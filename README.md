@@ -1,168 +1,230 @@
-"""
-src/agents/critic.py
-Centralized Shared Critic Network for MARL-CTDE Cloud Job Scheduling
+# MARL-CTDE Cloud Job Scheduling
+## Cooperative Multi-Agent Reinforcement Learning with Centralized Training and Decentralized Execution for Distributed Cloud Job Scheduling
 
-The shared critic has access to the GLOBAL state during training only.
-It provides value estimates to guide all agents' policy updates.
-During execution, the critic is NOT used — only actors run.
+[![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)](https://pytorch.org)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![Journal](https://img.shields.io/badge/Target-FGCS%20Scopus%20Q1-red)](https://www.sciencedirect.com/journal/future-generation-computer-systems)
 
-This implements the CTDE paradigm:
-    - Centralized Training: critic uses global state
-    - Decentralized Execution: only actors are deployed
+---
 
-References:
-    [21] Shi et al. (2025) - CTPDE framework
-    [22] Wang et al. (2024) - Coordination as inference
-    [23] Liu et al. (2024) - Cournot Policy Model MARL
-    [24] Zhang et al. (2024) - QDAP cooperative MARL
-"""
+## 📋 Overview
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional
+This repository contains the implementation of **MARL-CTDE**, a cooperative multi-agent reinforcement learning framework for distributed cloud job scheduling, evaluated on the **Google Borg Workload Traces (2019)**.
 
+> **Paper:** "Cooperative Multi-Agent Reinforcement Learning with Centralized Training and Decentralized Execution for Distributed Cloud Job Scheduling: An Empirical Study on Google Borg Workload Traces"
+> **Journal:** Future Generation Computer Systems (Elsevier, Scopus Q1)
+> **Status:** Under Review
 
-class SharedCriticNetwork(nn.Module):
-    """
-    Centralized Shared Critic Network.
+---
 
-    Architecture:
-        - Input: global state (all agents' observations + cluster resource state)
-        - Cross-Agent Attention: model inter-agent dependencies
-        - MLP: value estimation
-        - Output: scalar value V(s) for advantage computation
+## 🏗️ Architecture
 
-    Key design decisions:
-        1. Shared across all agents (reduces parameters, improves coordination)
-        2. Cross-attention models agent interaction patterns
-        3. Global state includes full cluster resource utilization
+```
+MARL-CTDE Framework
+├── Centralized Training
+│   └── Shared Critic Network (global state access)
+├── Decentralized Execution
+│   └── Per-Agent Actor Network (local observation only)
+└── Multi-Objective Reward
+    └── R = α·makespan + β·energy + γ·SLA_violation
+```
 
-    Only used during TRAINING. Not deployed during execution.
-    """
+---
 
-    def __init__(
-        self,
-        global_state_dim: int,
-        n_agents: int,
-        hidden_dim: int = 256,
-        num_heads: int = 4,
-        dropout: float = 0.1
-    ):
-        super(SharedCriticNetwork, self).__init__()
+## 📁 Repository Structure
 
-        self.global_state_dim = global_state_dim
-        self.n_agents = n_agents
-        self.hidden_dim = hidden_dim
+```
+marl_cloud_scheduling/
+├── README.md
+├── requirements.txt
+├── configs/
+│   ├── default_config.yaml        # Default hyperparameters
+│   └── borg_config.yaml           # Google Borg-specific config
+├── src/
+│   ├── agents/
+│   │   ├── actor.py               # Decentralized actor network
+│   │   ├── critic.py              # Centralized shared critic
+│   │   └── marl_agent.py          # Main MARL agent (MAPPO-based)
+│   ├── environment/
+│   │   ├── cloud_env.py           # Cloud scheduling environment
+│   │   ├── borg_loader.py         # Google Borg trace loader
+│   │   └── reward.py              # Multi-objective reward function
+│   └── utils/
+│       ├── metrics.py             # Evaluation metrics
+│       ├── logger.py              # Experiment logging
+│       └── statistical.py        # Wilcoxon, CI, Cohen's d
+├── scripts/
+│   ├── train.py                   # Training script
+│   ├── evaluate.py                # Evaluation script
+│   └── baseline.py                # Baseline algorithms
+├── tests/
+│   └── test_environment.py        # Unit tests
+└── results/
+    └── placeholder/               # Results go here after running
+```
 
-        # Global state embedding
-        self.state_embed = nn.Sequential(
-            nn.Linear(global_state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU()
-        )
+---
 
-        # Cross-agent attention: model coordination between agents
-        self.cross_agent_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            batch_first=True,
-            dropout=dropout
-        )
-        self.attention_norm = nn.LayerNorm(hidden_dim)
+## ⚙️ Installation
 
-        # Value MLP
-        self.value_net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1)
-        )
+```bash
+# Clone repository
+git clone https://github.com/[YOUR_USERNAME]/marl-cloud-scheduling.git
+cd marl-cloud-scheduling
 
-        # Initialize weights
-        self._init_weights()
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# venv\Scripts\activate   # Windows
 
-    def _init_weights(self):
-        """Orthogonal initialization."""
-        for layer in self.modules():
-            if isinstance(layer, nn.Linear):
-                nn.init.orthogonal_(layer.weight)
-                nn.init.zeros_(layer.bias)
+# Install dependencies
+pip install -r requirements.txt
+```
 
-    def forward(
-        self,
-        global_state: torch.Tensor,
-        agent_obs: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        Compute state value V(s).
+---
 
-        Args:
-            global_state: Full cluster state (batch_size, global_state_dim)
-            agent_obs: All agents' observations stacked (batch_size, n_agents, obs_dim)
-                       Used for cross-agent attention if provided
+## 📊 Dataset — Google Borg Trace 2019
 
-        Returns:
-            value: Estimated state value (batch_size, 1)
-        """
-        # Embed global state
-        state_emb = self.state_embed(global_state)  # (batch, hidden_dim)
+Download the Google Borg trace from:
+🔗 https://github.com/google/cluster-data
 
-        if agent_obs is not None:
-            # Cross-agent attention over all agents' observations
-            # Project agent obs to hidden dim
-            batch_size = agent_obs.shape[0]
+```bash
+# After downloading, place in:
+mkdir -p data/borg_trace_2019
+# Copy trace files to data/borg_trace_2019/
+```
 
-            # Use state embedding as query, agent observations as key/value
-            state_emb_expanded = state_emb.unsqueeze(1)  # (batch, 1, hidden_dim)
+Expected structure:
+```
+data/borg_trace_2019/
+├── job_events/
+├── task_events/
+├── machine_events/
+└── machine_attributes/
+```
 
-            # Simple projection of agent observations
-            agent_emb = agent_obs.mean(dim=-1, keepdim=True)
-            agent_emb = agent_emb.expand(-1, -1, self.hidden_dim)
+---
 
-            attended, _ = self.cross_agent_attention(
-                state_emb_expanded,  # query
-                agent_emb,           # key
-                agent_emb            # value
-            )
-            state_emb = self.attention_norm(state_emb + attended.squeeze(1))
+## 🚀 Training
 
-        # Compute value
-        value = self.value_net(state_emb)
+```bash
+# Train MARL-CTDE (default config)
+python scripts/train.py --config configs/borg_config.yaml
 
-        return value
+# Train with custom hyperparameters
+python scripts/train.py \
+    --n_agents 10 \
+    --n_episodes 5000 \
+    --lr_actor 3e-4 \
+    --lr_critic 1e-3 \
+    --alpha 0.4 \
+    --beta 0.3 \
+    --gamma_sla 0.3
 
-    def compute_advantages(
-        self,
-        rewards: torch.Tensor,
-        values: torch.Tensor,
-        next_values: torch.Tensor,
-        dones: torch.Tensor,
-        gamma: float = 0.99,
-        gae_lambda: float = 0.95
-    ) -> torch.Tensor:
-        """
-        Compute Generalized Advantage Estimation (GAE).
+# Train baselines for comparison
+python scripts/baseline.py --algorithm dqn
+python scripts/baseline.py --algorithm ppo
+python scripts/baseline.py --algorithm round_robin
+python scripts/baseline.py --algorithm min_min
+python scripts/baseline.py --algorithm ippo
+```
 
-        Args:
-            rewards: Reward signals (batch_size, T)
-            values: Estimated values V(s_t) (batch_size, T)
-            next_values: Estimated values V(s_{t+1}) (batch_size, T)
-            dones: Episode termination flags (batch_size, T)
-            gamma: Discount factor
-            gae_lambda: GAE lambda parameter
+---
 
-        Returns:
-            advantages: GAE advantages (batch_size, T)
-        """
-        deltas = rewards + gamma * next_values * (1 - dones) - values
-        advantages = torch.zeros_like(rewards)
+## 📈 Evaluation
 
-        gae = 0
-        for t in reversed(range(rewards.shape[-1])):
-            gae = deltas[..., t] + gamma * gae_lambda * (1 - dones[..., t]) * gae
-            advantages[..., t] = gae
+```bash
+# Evaluate trained model
+python scripts/evaluate.py \
+    --checkpoint results/checkpoints/best_model.pt \
+    --scale small    # small / medium / large
+    --n_runs 5       # for statistical significance
 
-        return advantages
+# Generate all result tables
+python scripts/evaluate.py --generate_tables
+```
+
+---
+
+## 🔬 Hyperparameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `n_agents` | 10 | Number of scheduling agents |
+| `lr_actor` | 3e-4 | Actor learning rate |
+| `lr_critic` | 1e-3 | Critic learning rate |
+| `gamma` | 0.99 | Discount factor |
+| `clip_epsilon` | 0.2 | PPO clipping parameter |
+| `batch_size` | 256 | Mini-batch size |
+| `buffer_size` | 100000 | Experience replay buffer size |
+| `alpha` (makespan) | 0.4 | Reward weight — makespan |
+| `beta` (energy) | 0.3 | Reward weight — energy |
+| `gamma_sla` (SLA) | 0.3 | Reward weight — SLA violation |
+| `n_episodes` | 5000 | Training episodes |
+| `seed` | 42 | Random seed (reproducibility) |
+
+---
+
+## 📋 Evaluation Metrics
+
+| Metric | Formula | Reference |
+|--------|---------|-----------|
+| Makespan | Total completion time | Lower = better |
+| Energy Consumption | Σ power × time | Lower = better |
+| SLA Violation Rate | % jobs exceeding deadline | Lower = better |
+| Convergence Speed | Episodes to stable reward | Lower = better |
+| Resource Utilization | Avg CPU/memory usage | Higher = better |
+| Fairness Index | Jain's Fairness Index | Higher = better |
+
+---
+
+## 📊 Baseline Algorithms
+
+| Algorithm | Type | Reference |
+|-----------|------|-----------|
+| Round Robin | Heuristic | Classic |
+| Min-Min | Heuristic | Arunarani et al. 2019 |
+| DQN | Single-agent RL | — |
+| PPO | Single-agent RL | — |
+| IPPO | Independent MARL | — |
+| **MARL-CTDE (Ours)** | Cooperative MARL | This paper |
+
+---
+
+## 🧪 Statistical Analysis
+
+All results include:
+- Wilcoxon signed-rank test (p < 0.05)
+- 95% Confidence Intervals
+- Cohen's d effect size
+- 5 independent runs per experiment
+
+---
+
+## 📝 Citation
+
+```bibtex
+@article{[AUTHOR]2025marl,
+  title={Cooperative Multi-Agent Reinforcement Learning with Centralized Training 
+         and Decentralized Execution for Distributed Cloud Job Scheduling},
+  author={[YOUR NAME et al.]},
+  journal={Future Generation Computer Systems},
+  year={2025},
+  publisher={Elsevier},
+  note={Under Review}
+}
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+## 🙏 Acknowledgements
+
+- Google Borg Team for the cluster trace dataset
+- CloudSim Plus for the simulation framework
